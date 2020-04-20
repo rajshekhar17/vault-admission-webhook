@@ -1,0 +1,46 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vault-secrets-injector-webhook-deployment
+  namespace: vault-secrets-injector
+  labels:
+    app: vault-secrets-injector
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vault-secrets-injector
+  template:
+    metadata:
+      labels:
+        app: vault-secrets-injector
+    spec:
+      containers:
+        - name: vault-secrets-injector
+          env:
+            - name: TOKEN
+              value: ${VAULT_TOKEN}
+            - name: VAULT_ADDR
+              value: ${VAULT_ADDRESS}
+          image: rajshekhar17/vault-secret-injector:latest
+          imagePullPolicy: Always
+          args:
+          - -sidecarCfgFile=/etc/webhook/config/sidecarconfig.yaml
+          - -tlsCertFile=/etc/webhook/certs/cert.pem
+          - -tlsKeyFile=/etc/webhook/certs/key.pem
+          - -alsologtostderr
+          - -v=4
+          - 2>&1
+          volumeMounts:
+          - name: webhook-certs
+            mountPath: /etc/webhook/certs
+            readOnly: true
+          - name: webhook-config
+            mountPath: /etc/webhook/config
+      volumes:
+      - name: webhook-certs
+        secret:
+          secretName: vault-secrets-injector-webhook-certs
+      - name: webhook-config
+        configMap:
+          name: vault-secrets-injector-webhook-configmap
