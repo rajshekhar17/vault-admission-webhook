@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-
 	"github.com/golang/glog"
 )
 
@@ -18,8 +17,8 @@ func main() {
 
 	// get command line parameters
 	flag.IntVar(&parameters.port, "port", 8443, "Webhook server port.")
-	flag.StringVar(&parameters.certFile, "tlsCertFile", "/etc/webhook/certs/cert.pem", "File containing the x509 Certificate for HTTPS.")
-	flag.StringVar(&parameters.keyFile, "tlsKeyFile", "/etc/webhook/certs/key.pem", "File containing the x509 private key to --tlsCertFile.")
+	flag.StringVar(&parameters.certFile, "tlsCertFile", "/etc/webhook/certs/tls.crt", "File containing the x509 Certificate for HTTPS.")
+	flag.StringVar(&parameters.keyFile, "tlsKeyFile", "/etc/webhook/certs/tls.key", "File containing the x509 private key to --tlsCertFile.")
 	flag.StringVar(&parameters.sidecarCfgFile, "sidecarCfgFile", "/etc/webhook/config/sidecarconfig.yaml", "File containing the mutation configuration.")
 	flag.Parse()
 

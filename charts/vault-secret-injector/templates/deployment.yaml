@@ -1,8 +1,8 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: vault-secrets-injector-webhook-deployment
-  namespace: vault-secrets-injector
+  namespace: {{ .Release.Namespace }}
+  name: {{ template "vault-secret-injector.fullname" . }}
   labels:
     app: vault-secrets-injector
 spec:
@@ -15,19 +15,20 @@ spec:
       labels:
         app: vault-secrets-injector
     spec:
+      serviceAccount: {{ include "vault-secret-injector.serviceAccountName" . }}
       containers:
-        - name: vault-secrets-injector
+        - name: {{ template "vault-secret-injector.fullname" . }}
           env:
-            - name: TOKEN
-              value: ${VAULT_TOKEN}
             - name: VAULT_ADDR
-              value: ${VAULT_ADDRESS}
+              value: {{ .Values.vault.url }}
+            - name: ROLE
+              value: {{ .Values.vault.role }}
           image: rajshekhar17/vault-secret-injector:latest
           imagePullPolicy: Always
           args:
           - -sidecarCfgFile=/etc/webhook/config/sidecarconfig.yaml
-          - -tlsCertFile=/etc/webhook/certs/cert.pem
-          - -tlsKeyFile=/etc/webhook/certs/key.pem
+          - -tlsCertFile=/etc/webhook/certs/tls.crt
+          - -tlsKeyFile=/etc/webhook/certs/tls.key
           - -alsologtostderr
           - -v=4
           - 2>&1
@@ -40,7 +41,7 @@ spec:
       volumes:
       - name: webhook-certs
         secret:
-          secretName: vault-secrets-injector-webhook-certs
+          secretName: {{ template "vault-secret-injector.fullname" . }}-validation-webhook-keypair
       - name: webhook-config
         configMap:
-          name: vault-secrets-injector-webhook-configmap
+          name: {{ template "vault-secret-injector.fullname" . }}-configmap

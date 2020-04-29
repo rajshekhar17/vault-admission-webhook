@@ -16,10 +16,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
-	//v1 "k8s.io/kubernetes/pkg/apis/core/v1"
 	uv1 "k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"github.com/hashicorp/vault/api"
 	"os"
+	"bytes"
 	yamlv2 "gopkg.in/yaml.v2"
 )
 
@@ -31,6 +31,7 @@ var (
 	// (https://github.com/kubernetes/kubernetes/issues/57982)
 	defaulter = runtime.ObjectDefaulter(runtimeScheme)
 	token = os.Getenv("TOKEN")
+	role = os.Getenv("ROLE")
 	vault_addr = os.Getenv("VAULT_ADDR")
 	insecure, _ = strconv.ParseBool(os.Getenv("VAULT_SKIP_VERIFY"))
 	vaultConfigPath = os.Getenv("VAULT_CONFIG_PATH")
@@ -63,6 +64,22 @@ type Config struct {
 	Volumes    []corev1.Volume    `yaml:"volumes"`
 }
 
+type vaultTokenRequest struct {
+	Role	string	`json:"role"`
+	Jwt		string	`json:"jwt"`
+}
+
+type vaultTokenResponse struct {
+	Auth struct {
+		Token				string		`json:"client_token"`
+		Accessor			string		`json:"accessor"`
+		Policies			string		`json:"policies"`
+		Metadata			interface{}	`json:"metadata"`
+		Lease_duration		int64		`json:"lease_duration"`
+		Renewable			bool		`json:"renewable"`
+
+	} `json:"auth"`
+}
 
 // Webhook Server parameters
 type WhSvrParameters struct {
@@ -79,6 +96,7 @@ type patchOperation struct {
 }
 
 func getVaultSecret(client *api.Client, vaultPath string, key string) (string, error) {
+	renewVaultTokenLease()
 	secret, err := client.Logical().Read(vaultPath)
 	if err != nil {
 		glog.Errorf("Error fetching secret :%v",err)
@@ -116,32 +134,47 @@ func getVaultConfig(){
 	config := &VaultConfig{}
 	if vaultConfigPath == "" {
 		glog.Infof("No vaultconfig file defined using env vars")
-		return
-	}
-	// Open config file
-	file, err := os.Open(vaultConfigPath)
-	if err != nil {
-		glog.Infof("Unable to locate vault config file, using env vars")
-		return
-	}
-	defer file.Close()
-
-	// Init new YAML decode
-	d := yamlv2.NewDecoder(file)
-
-	// Start YAML decoding from file
-	if err := d.Decode(&config); err != nil {
-		glog.Infof("Vault configuration file not valid")
-		return
 	} else {
-		if config.Token != "" {
-			token = config.Token//os.Getenv("TOKEN")
+		// Open config file
+		file, err := os.Open(vaultConfigPath)
+		if err != nil {
+			glog.Infof("Unable to locate vault config file, using env vars")
+			return
 		}
-		if config.Address != "" {
-			vault_addr = config.Address//os.Getenv("VAULT_ADDR")
+		defer file.Close()
+
+		// Init new YAML decode
+		d := yamlv2.NewDecoder(file)
+
+		// Start YAML decoding from file
+		if err := d.Decode(&config); err != nil {
+			glog.Infof("Vault configuration file not valid")
+			return
+		} else {
+			if config.Token != "" {
+				token = config.Token//os.Getenv("TOKEN")
+			}
+			if config.Address != "" {
+				vault_addr = config.Address//os.Getenv("VAULT_ADDR")
+			}
+			if config.Insecure == true {
+				insecure = config.Insecure//os.Getenv("VAULT_SKIP_VERIFY")
+			}
 		}
-		if config.Insecure == true {
-			insecure = config.Insecure//os.Getenv("VAULT_SKIP_VERIFY")
+	}
+	if token == "" {
+		glog.Infof("Unable to fetch token, trying kube auth method in vault")
+		content, err := ioutil.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/token")
+		if err != nil {
+			glog.Errorf("No service token assigned unable to continue")
+			fmt.Errorf("%s",err)
+		}
+
+		// Convert []byte to string and print to screen
+		kube_token := string(content)
+		token, err = getVaultToken(kube_token)
+		if err != nil {
+			glog.Errorf("Unable to fetch vault token, this probably is not going to end well !!")
 		}
 	}
 }
@@ -152,7 +185,6 @@ func init() {
 	// defaulting with webhooks:
 	// https://github.com/kubernetes/kubernetes/issues/57982
 	//_ = v1.AddToScheme(runtimeScheme)
-	getVaultConfig()
 }
 
 func loadConfig(configFile string) (*Config, error) {
@@ -168,6 +200,50 @@ func loadConfig(configFile string) (*Config, error) {
 	}
 
 	return &cfg, nil
+}
+
+func getVaultToken(kube_token string) (string, error){
+	url := fmt.Sprintf(vault_addr+"/v1/auth/kubernetes/login")
+	requestPayload := &vaultTokenRequest{
+		Role: role,
+		Jwt:  kube_token,
+	}
+	j, err := json.Marshal(requestPayload)
+	if err != nil {
+		return "", err
+	}
+	resp, err := http.Post(url, "application/json", bytes.NewBuffer(j))
+    if err != nil {
+		glog.Errorf("Unable to fetch token from vault using kubernetes auth and the service token...")
+        return "", err
+    }
+
+    defer resp.Body.Close()
+    bodyBytes, _ := ioutil.ReadAll(resp.Body)
+	
+    var reponseData vaultTokenResponse
+	json.Unmarshal(bodyBytes, &reponseData)
+	if strings.Contains(string(bodyBytes), "error:") {
+		glog.Errorf("Error from vault: %s", string(bodyBytes))
+	}
+	if reponseData.Auth.Token != "" {
+		glog.Infof("Fetched token using k8s auth")
+	}
+	return reponseData.Auth.Token, nil
+}
+
+func renewVaultTokenLease(){
+	url := fmt.Sprintf(vault_addr+"/v1/auth/token/renew-self")
+	
+	client := &http.Client{}
+	postData := []byte(`{}`)
+	req, err := http.NewRequest("POST", url, bytes.NewReader(postData))
+	req.Header.Add("X-Vault-Token", token)
+	resp, err := client.Do(req)
+	defer resp.Body.Close()
+    if err != nil {
+		glog.Errorf("Unable to renew vault token, further requests might fail..")
+	}
 }
 
 // Check whether the target resoured need to be mutated
@@ -221,15 +297,6 @@ func updateAnnotation(target map[string]string, added map[string]string) (patch 
 			})
 		}
 	}
-	return patch
-}
-
-func updateNamespace() (patch []patchOperation) {
-	patch = append(patch, patchOperation{
-		Op:    "replace",
-		Path:  "/metadata/namespace",
-		Value: "default",
-	})
 	return patch
 }
 
@@ -298,6 +365,7 @@ func createPatch(kubeObj *uv1.Unstructured, annotations map[string]string) ([]by
 
 // main mutation process
 func (whsvr *WebhookServer) mutate(ar *av1.AdmissionReview) *av1.AdmissionResponse {
+	getVaultConfig()
 	req := ar.Request
 	
 	var kubeObj uv1.Unstructured
